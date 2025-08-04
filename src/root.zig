@@ -103,6 +103,7 @@ pub fn fetch2(client: *std.http.Client, url: []const u8, comptime T: type) !Json
     const allocator = client.allocator;
 
     var buf = try std.ArrayList(u8).initCapacity(allocator, 1024);
+    errdefer buf.deinit();
 
     const http_result = try client.fetch(.{
         .location = .{ .url = url },
