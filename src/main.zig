@@ -22,35 +22,21 @@ pub fn main() !void {
     var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
 
-    // Version 1
-    // const result = try jsonfetch.fetch1(&client, url, *HttpBinResponse);
-    // defer result.deinit();
-    //
-    // const parsed = result.parsed orelse {
-    //     try stdout.print("Non-200 response received: {d}\n", .{result.status});
-    //     return;
-    // };
-    // const value = parsed.value;
-
-    // Version 2
-    const result = try jsonfetch.fetch2(&client, url, *HttpBinResponse);
-    defer result.deinit();
-
-    const value = result.value orelse {
-        try stdout.print("Non-200 response received: {d}\n", .{result.status});
-        return;
+    const parsed = jsonfetch.fetch(&client, url, *HttpBinResponse) catch |err| {
+        std.debug.print("JSON fetch failed with {t}\n", .{err});
+        std.process.exit(1);
     };
+    defer parsed.deinit();
+    const value = parsed.value;
 
-    // Everything below is the same.
     try stdout.print(
         \\
         \\url     = {s}
         \\method  = {s}
-        \\status  = {d}
         \\origin  = {s}
         \\headers =
         \\
-    , .{ value.url, value.method, result.status, value.origin });
+    , .{ value.url, value.method, value.origin });
 
     var it = value.headers.object.iterator();
     while (it.next()) |hdr| {
