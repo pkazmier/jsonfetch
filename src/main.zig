@@ -22,10 +22,12 @@ pub fn main() !void {
     var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
 
-    const parsed = jsonfetch.fetch(&client, url, *HttpBinResponse) catch |err| {
+    var timer = try std.time.Timer.start();
+    const parsed = jsonfetch.fetch(&client, *HttpBinResponse, .{ .location = .{ .url = url } }) catch |err| {
         std.debug.print("JSON fetch failed with {t}\n", .{err});
         std.process.exit(1);
     };
+    std.debug.print("Fetch took {}ms\n", .{timer.read() / std.time.ns_per_ms});
     defer parsed.deinit();
     const value = parsed.value;
 
