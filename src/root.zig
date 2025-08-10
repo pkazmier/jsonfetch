@@ -1,4 +1,6 @@
 const std = @import("std");
+const FetchOptions = std.http.Client.FetchOptions;
+const ParseOptions = std.json.ParseOptions;
 const log = std.log.scoped(.jsonfetch);
 const Parsed = std.json.Parsed;
 
@@ -9,22 +11,49 @@ pub const FetchError = std.mem.Allocator.Error ||
         JsonParseError,
     };
 
-// Caller must call `deinit` on the returned object.
-pub fn fetch(client: *std.http.Client, comptime T: type, options: std.http.Client.FetchOptions) FetchError!Parsed(T) {
+/// Perform a one-shot HTTP request and parse the JSON response upon 200
+/// success with the provided options. Reusing the same client in subsequent
+/// calls allows use of HTTP connection keep-alives.
+///
+/// This function is thread-safe.
+///
+/// Basic usage:
+///
+///    const Response = struct {
+///        age: i32,
+///        name: []const u8,
+///    };
+///
+///    var client = std.http.Client{ .allocator = allocator };
+///    defer client.deinit();
+///
+///    const parsed = try fetch(
+///        &client,
+///        *Response,
+///        .{ .location = .{ .url = "http://test.example.com/user" } },
+///        .{ .ignore_unknown_fields = true },
+///    );
+///    defer parsed.deinit();
+///
+///    std.debug.print("{s} is {d} years old\n", .{ parsed.value.name, parsed.value.age });
+///
+pub fn fetch(client: *std.http.Client, comptime T: type, fetch_opts: FetchOptions, parse_opts: ParseOptions) FetchError!Parsed(T) {
     const allocator = client.allocator;
+    var fetch_opts_copy = fetch_opts;
+    var parse_opts_copy = parse_opts;
 
     // If user doesn't provide response storage, then we provide it.
-    var options_copy = options;
     var maybe_buf: ?std.ArrayList(u8) = null;
-    if (options_copy.response_storage == .ignore) {
+    if (fetch_opts.response_storage == .ignore) {
         maybe_buf = try std.ArrayList(u8).initCapacity(allocator, 1024);
-        options_copy.response_storage = .{ .dynamic = &maybe_buf.? };
+        fetch_opts_copy.response_storage = .{ .dynamic = &maybe_buf.? };
+        parse_opts_copy.allocate = .alloc_always;
     }
     defer {
         if (maybe_buf) |buf| buf.deinit();
     }
 
-    const http_result = client.fetch(options_copy) catch |err| {
+    const http_result = client.fetch(fetch_opts_copy) catch |err| {
         log.debug("HTTP fetch failed with {t}", .{err});
         return FetchError.HttpFetchError;
     };
@@ -37,17 +66,13 @@ pub fn fetch(client: *std.http.Client, comptime T: type, options: std.http.Clien
         return FetchError.HttpStatusError;
     }
 
-    const items: []u8 = switch (options_copy.response_storage) {
+    const items: []u8 = switch (fetch_opts_copy.response_storage) {
         .dynamic => |al| al.items,
         .static => |alu| alu.items,
-        .ignore => unreachable,
+        .ignore => unreachable, // because we provide storage if user doesn't
     };
 
-    // TODO: allow user to specify parse options.
-    const parsed = std.json.parseFromSlice(T, allocator, items, .{
-        .ignore_unknown_fields = true,
-        .allocate = .alloc_always,
-    }) catch |err| {
+    const parsed = std.json.parseFromSlice(T, allocator, items, parse_opts_copy) catch |err| {
         log.debug("JSON parse failed with {t}", .{err});
         return FetchError.JsonParseError;
     };
@@ -76,7 +101,7 @@ test "json fetch typical use case" {
             .host = .{ .raw = "127.0.0.1" },
             .port = test_server.port(),
         } },
-    });
+    }, .{});
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("George Costanza", parsed.value.name);
@@ -107,7 +132,7 @@ test "json fetch with client provided dynamic storage for response" {
             .port = test_server.port(),
         } },
         .response_storage = .{ .dynamic = &buf },
-    });
+    }, .{});
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("George Costanza", parsed.value.name);
@@ -139,7 +164,7 @@ test "json fetch with client provided static storage for response" {
             .port = test_server.port(),
         } },
         .response_storage = .{ .static = &buf },
-    });
+    }, .{});
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("George Costanza", parsed.value.name);
@@ -172,7 +197,7 @@ test "json fetch with client provided too small static storage for response" {
             .port = test_server.port(),
         } },
         .response_storage = .{ .static = &buf },
-    });
+    }, .{});
     try std.testing.expectError(FetchError.JsonParseError, parsed);
 }
 
@@ -195,11 +220,11 @@ test "json fetch non-200 response from server" {
             .host = .{ .raw = "127.0.0.1" },
             .port = test_server.port(),
         } },
-    });
+    }, .{});
     try std.testing.expectError(FetchError.HttpStatusError, parsed);
 }
 
-test "json fetch with extra fields in response from server" {
+test "json fetch ignoring extra fields in response from server" {
     const test_server = try test_server_with_json();
     defer test_server.destroy();
 
@@ -210,15 +235,41 @@ test "json fetch with extra fields in response from server" {
     var client = std.http.Client{ .allocator = std.testing.allocator };
     defer client.deinit();
 
-    const parsed = try fetch(&client, *Response, .{
+    const parsed = try fetch(
+        &client,
+        *Response,
+        .{
+            .location = .{ .uri = .{
+                .scheme = "http",
+                .host = .{ .raw = "127.0.0.1" },
+                .port = test_server.port(),
+            } },
+        },
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqual(38, parsed.value.age);
+}
+
+test "json fetch without ignoring extra fields in response from server" {
+    const test_server = try test_server_with_json();
+    defer test_server.destroy();
+
+    const Response = struct {
+        age: i32,
+    };
+
+    var client = std.http.Client{ .allocator = std.testing.allocator };
+    defer client.deinit();
+
+    const parsed = fetch(&client, *Response, .{
         .location = .{ .uri = .{
             .scheme = "http",
             .host = .{ .raw = "127.0.0.1" },
             .port = test_server.port(),
         } },
-    });
-    defer parsed.deinit();
-    try std.testing.expectEqual(38, parsed.value.age);
+    }, .{});
+    try std.testing.expectError(FetchError.JsonParseError, parsed);
 }
 
 test "json fetch with missing fields in response from server" {
@@ -239,7 +290,7 @@ test "json fetch with missing fields in response from server" {
             .host = .{ .raw = "127.0.0.1" },
             .port = test_server.port(),
         } },
-    });
+    }, .{});
     try std.testing.expectError(FetchError.JsonParseError, parsed);
 }
 
@@ -255,7 +306,7 @@ test "json fetch to non-existent server" {
 
     const parsed = fetch(&client, *Response, .{
         .location = .{ .url = "http://nosuchhost.example.com" },
-    });
+    }, .{});
     try std.testing.expectError(FetchError.HttpFetchError, parsed);
 }
 

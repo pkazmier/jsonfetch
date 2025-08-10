@@ -23,7 +23,12 @@ pub fn main() !void {
     defer client.deinit();
 
     var timer = try std.time.Timer.start();
-    const parsed = jsonfetch.fetch(&client, *HttpBinResponse, .{ .location = .{ .url = url } }) catch |err| {
+    const parsed = jsonfetch.fetch(
+        &client,
+        *HttpBinResponse,
+        .{ .location = .{ .url = url } },
+        .{ .ignore_unknown_fields = true },
+    ) catch |err| {
         std.debug.print("JSON fetch failed with {t}\n", .{err});
         std.process.exit(1);
     };
