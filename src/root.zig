@@ -12,8 +12,8 @@ pub const FetchError = std.mem.Allocator.Error ||
     };
 
 /// Perform a one-shot HTTP request and parse the JSON response upon 200
-/// success with the provided options. Reusing the same client in subsequent
-/// calls allows use of HTTP connection keep-alives.
+/// success with the provided options. Reuse the same client in subsequent
+/// calls to take advantage of HTTP connection keep-alive.
 ///
 /// This function is thread-safe.
 ///
@@ -39,19 +39,20 @@ pub const FetchError = std.mem.Allocator.Error ||
 ///
 pub fn fetch(client: *std.http.Client, comptime T: type, fetch_opts: FetchOptions, parse_opts: ParseOptions) FetchError!Parsed(T) {
     const allocator = client.allocator;
+
+    // We use an Allocating writer to collect the JSON response
+    std.debug.assert(fetch_opts.response_writer == null);
+    std.debug.assert(parse_opts.allocate == null);
+
+    // Buffer for JSON response from server
+    var buffer = try std.io.Writer.Allocating.initCapacity(allocator, 1024);
+    defer buffer.deinit();
+
+    // We will be changing one field in both these options sets
     var fetch_opts_copy = fetch_opts;
     var parse_opts_copy = parse_opts;
-
-    // If user doesn't provide response storage, then we provide it.
-    var maybe_buf: ?std.ArrayList(u8) = null;
-    if (fetch_opts.response_storage == .ignore) {
-        maybe_buf = try std.ArrayList(u8).initCapacity(allocator, 1024);
-        fetch_opts_copy.response_storage = .{ .dynamic = &maybe_buf.? };
-        parse_opts_copy.allocate = .alloc_always;
-    }
-    defer {
-        if (maybe_buf) |buf| buf.deinit();
-    }
+    fetch_opts_copy.response_writer = &buffer.writer;
+    parse_opts_copy.allocate = .alloc_always;
 
     const http_result = client.fetch(fetch_opts_copy) catch |err| {
         log.debug("HTTP fetch failed with {t}", .{err});
@@ -66,11 +67,10 @@ pub fn fetch(client: *std.http.Client, comptime T: type, fetch_opts: FetchOption
         return FetchError.HttpStatusError;
     }
 
-    const items: []u8 = switch (fetch_opts_copy.response_storage) {
-        .dynamic => |al| al.items,
-        .static => |alu| alu.items,
-        .ignore => unreachable, // because we provide storage if user doesn't
-    };
+    // Need to get an []u8 slice for the json parser from our buffer
+    var list = buffer.toArrayList();
+    defer list.deinit(allocator);
+    const items: []u8 = list.items;
 
     const parsed = std.json.parseFromSlice(T, allocator, items, parse_opts_copy) catch |err| {
         log.debug("JSON parse failed with {t}", .{err});
@@ -82,7 +82,7 @@ pub fn fetch(client: *std.http.Client, comptime T: type, fetch_opts: FetchOption
 // ----------------------------------------------------------------------------
 // Testing code follows
 // ----------------------------------------------------------------------------
-test "json fetch typical use case" {
+test "json fetch" {
     const test_server = try test_server_with_json();
     defer test_server.destroy();
 
@@ -107,98 +107,6 @@ test "json fetch typical use case" {
     try std.testing.expectEqualStrings("George Costanza", parsed.value.name);
     try std.testing.expectEqual(38, parsed.value.age);
     try std.testing.expectEqualDeep(&[_][]const u8{ "Art Vandalay", "Buck Naked" }, parsed.value.aliases);
-}
-
-test "json fetch with client provided dynamic storage for response" {
-    const test_server = try test_server_with_json();
-    defer test_server.destroy();
-
-    const Response = struct {
-        age: i32,
-        name: []const u8,
-        aliases: [][]const u8,
-    };
-
-    var client = std.http.Client{ .allocator = std.testing.allocator };
-    defer client.deinit();
-
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-
-    const parsed = try fetch(&client, *Response, .{
-        .location = .{ .uri = .{
-            .scheme = "http",
-            .host = .{ .raw = "127.0.0.1" },
-            .port = test_server.port(),
-        } },
-        .response_storage = .{ .dynamic = &buf },
-    }, .{});
-    defer parsed.deinit();
-
-    try std.testing.expectEqualStrings("George Costanza", parsed.value.name);
-    try std.testing.expectEqual(38, parsed.value.age);
-    try std.testing.expectEqualDeep(&[_][]const u8{ "Art Vandalay", "Buck Naked" }, parsed.value.aliases);
-}
-
-test "json fetch with client provided static storage for response" {
-    const test_server = try test_server_with_json();
-    defer test_server.destroy();
-
-    const Response = struct {
-        age: i32,
-        name: []const u8,
-        aliases: [][]const u8,
-    };
-
-    var client = std.http.Client{ .allocator = std.testing.allocator };
-    defer client.deinit();
-
-    // Pass in our own static buffer for the response storage
-    var buf = try std.ArrayListUnmanaged(u8).initCapacity(std.testing.allocator, 1024);
-    defer buf.deinit(std.testing.allocator);
-
-    const parsed = try fetch(&client, *Response, .{
-        .location = .{ .uri = .{
-            .scheme = "http",
-            .host = .{ .raw = "127.0.0.1" },
-            .port = test_server.port(),
-        } },
-        .response_storage = .{ .static = &buf },
-    }, .{});
-    defer parsed.deinit();
-
-    try std.testing.expectEqualStrings("George Costanza", parsed.value.name);
-    try std.testing.expectEqual(38, parsed.value.age);
-    try std.testing.expectEqualDeep(&[_][]const u8{ "Art Vandalay", "Buck Naked" }, parsed.value.aliases);
-}
-
-test "json fetch with client provided too small static storage for response" {
-    const test_server = try test_server_with_json();
-    defer test_server.destroy();
-
-    const Response = struct {
-        age: i32,
-        name: []const u8,
-        aliases: [][]const u8,
-    };
-
-    var client = std.http.Client{ .allocator = std.testing.allocator };
-    defer client.deinit();
-
-    // Pass in a static buffer for the response storage that is too small. 80
-    // bytes is too small for the server response.
-    var buf = try std.ArrayListUnmanaged(u8).initCapacity(std.testing.allocator, 80);
-    defer buf.deinit(std.testing.allocator);
-
-    const parsed = fetch(&client, *Response, .{
-        .location = .{ .uri = .{
-            .scheme = "http",
-            .host = .{ .raw = "127.0.0.1" },
-            .port = test_server.port(),
-        } },
-        .response_storage = .{ .static = &buf },
-    }, .{});
-    try std.testing.expectError(FetchError.JsonParseError, parsed);
 }
 
 test "json fetch non-200 response from server" {
@@ -221,6 +129,7 @@ test "json fetch non-200 response from server" {
             .port = test_server.port(),
         } },
     }, .{});
+
     try std.testing.expectError(FetchError.HttpStatusError, parsed);
 }
 
@@ -248,6 +157,7 @@ test "json fetch ignoring extra fields in response from server" {
         .{ .ignore_unknown_fields = true },
     );
     defer parsed.deinit();
+
     try std.testing.expectEqual(38, parsed.value.age);
 }
 
@@ -269,6 +179,7 @@ test "json fetch without ignoring extra fields in response from server" {
             .port = test_server.port(),
         } },
     }, .{});
+
     try std.testing.expectError(FetchError.JsonParseError, parsed);
 }
 
@@ -291,6 +202,7 @@ test "json fetch with missing fields in response from server" {
             .port = test_server.port(),
         } },
     }, .{});
+
     try std.testing.expectError(FetchError.JsonParseError, parsed);
 }
 
@@ -307,6 +219,7 @@ test "json fetch to non-existent server" {
     const parsed = fetch(&client, *Response, .{
         .location = .{ .url = "http://nosuchhost.example.com" },
     }, .{});
+
     try std.testing.expectError(FetchError.HttpFetchError, parsed);
 }
 
@@ -328,18 +241,27 @@ const TestServer = struct {
 fn createTestServer(S: type) !*TestServer {
     const address = try std.net.Address.parseIp("127.0.0.1", 0);
     const test_server = try std.testing.allocator.create(TestServer);
-    test_server.net_server = try address.listen(.{ .reuse_address = true });
-    test_server.server_thread = try std.Thread.spawn(.{}, S.run, .{&test_server.net_server});
+    test_server.* = .{
+        .net_server = try address.listen(.{ .reuse_address = true }),
+        .server_thread = try std.Thread.spawn(.{}, S.run, .{test_server}),
+    };
     return test_server;
 }
 
 fn test_server_with_json() !*TestServer {
     return try createTestServer(struct {
-        fn run(net_server: *std.net.Server) anyerror!void {
+        fn run(test_server: *TestServer) anyerror!void {
+            const net_server = &test_server.net_server;
+            var recv_buffer: [1024]u8 = undefined;
+            var send_buffer: [1024]u8 = undefined;
+
             const conn = try net_server.accept();
             defer conn.stream.close();
-            var header_buffer: [888]u8 = undefined;
-            var server = std.http.Server.init(conn, &header_buffer);
+
+            var connection_br = conn.stream.reader(&recv_buffer);
+            var connection_bw = conn.stream.writer(&send_buffer);
+            var server = std.http.Server.init(connection_br.interface(), &connection_bw.interface);
+
             var request = try server.receiveHead();
             try request.respond(
                 \\{
@@ -354,11 +276,18 @@ fn test_server_with_json() !*TestServer {
 
 fn test_server_non200_response() !*TestServer {
     return try createTestServer(struct {
-        fn run(net_server: *std.net.Server) anyerror!void {
+        fn run(test_server: *TestServer) anyerror!void {
+            const net_server = &test_server.net_server;
+            var recv_buffer: [1024]u8 = undefined;
+            var send_buffer: [1024]u8 = undefined;
+
             const conn = try net_server.accept();
             defer conn.stream.close();
-            var header_buffer: [888]u8 = undefined;
-            var server = std.http.Server.init(conn, &header_buffer);
+
+            var connection_br = conn.stream.reader(&recv_buffer);
+            var connection_bw = conn.stream.writer(&send_buffer);
+            var server = std.http.Server.init(connection_br.interface(), &connection_bw.interface);
+
             var request = try server.receiveHead();
             try request.respond("", .{ .status = .not_found });
         }

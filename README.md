@@ -27,10 +27,11 @@ This library tracks Zig main.
    exe.root_module.addImport("jsonfetch", jsonfetch.module("jsonfetch"));
    ```
 
-## Examples
+## Example
 
-The following examples parse the JSON output returned by the
-[`httpbin.org/anything`](http://httpbin.org/anything) endpoint. For reference:
+The following example parses the JSON output returned by the
+[`httpbin.org/anything`](http://httpbin.org/anything) endpoint, which is shown
+below:
 
 ```json
 {
@@ -49,8 +50,6 @@ The following examples parse the JSON output returned by the
   "url": "http://httpbin.org/anything"
 }
 ```
-
-### Typical usage
 
 To use `jsonfetch.fetch` you'll define a struct to hold the parsed result. The
 Zig JSON parser requires that the fields of this struct match the fields of
@@ -82,55 +81,6 @@ pub fn main() !void {
         .{ .location = .{ .url = "http://httpbin.org/anything" } },
         // std.json.ParseOptions
         .{ .ignore_unknown_fields = true },
-    );
-    defer parsed.deinit();
-
-    const v = parsed.value;
-    std.debug.print("{s} {s} from {s}\n", .{ v.method, v.url, v.origin });
-}
-```
-
-### Advanced usage
-
-In this example we provide a buffer to hold the JSON response from the server.
-This allows us to use the `.alloc_if_needed` parse option to avoid allocations
-of strings in our parsed result because the parser can use slices into this
-buffer.
-
-```zig
-const std = @import("std");
-const jsonfetch = @import("jsonfetch");
-
-const HttpBinResponse = struct {
-    url: []const u8,
-    method: []const u8,
-    origin: []const u8,
-};
-
-pub fn main() !void {
-    var gpa = std.heap.DebugAllocator(.{}).init;
-    defer _ = gpa.detectLeaks();
-    const allocator = gpa.allocator();
-
-    var client = std.http.Client{ .allocator = allocator };
-    defer client.deinit();
-
-    var buf = try std.ArrayListUnmanaged(u8).initCapacity(allocator, 4096);
-    defer buf.deinit(allocator);
-
-    const parsed = try jsonfetch.fetch(
-        &client,
-        *HttpBinResponse,
-        // std.http.Client.FetchOptions
-        .{
-            .location = .{ .url = "http://httpbin.org/anything" },
-            .response_storage = .{ .static = &buf },
-        },
-        // std.json.ParseOptions
-        .{
-            .allocate = .alloc_if_needed,
-            .ignore_unknown_fields = true,
-        },
     );
     defer parsed.deinit();
 
