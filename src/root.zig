@@ -45,7 +45,7 @@ pub fn fetch(client: *std.http.Client, comptime T: type, fetch_opts: FetchOption
     std.debug.assert(parse_opts.allocate == null);
 
     // Buffer for JSON response from server
-    var buffer = try std.io.Writer.Allocating.initCapacity(allocator, 1024);
+    var buffer = try std.Io.Writer.Allocating.initCapacity(allocator, 1024);
     defer buffer.deinit();
 
     // We will be changing one field in both these options sets
